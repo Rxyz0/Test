@@ -1,0 +1,868 @@
+-- =================================================================
+-- REX HUB
+-- Tabs: AFK | Auto Claim (Alliance Tower Defense) | Settings
+-- =================================================================
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CoreGui = game:GetService("CoreGui")
+local VirtualUser = game:GetService("VirtualUser")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
+local StarterGui = game:GetService("StarterGui")
+local LocalPlayer = Players.LocalPlayer
+
+local GUI_NAME = "RexHub"
+local FILE_NAME = "RexHub_Settings.json"
+local HEADER_H = 36
+local TAB_AREA_H = 44
+local BOTTOM_PAD = 12
+
+local COLOR_WHITE = Color3.fromRGB(255, 255, 255)
+local COLOR_TEXT = Color3.fromRGB(235, 235, 235)
+local COLOR_MUTED = Color3.fromRGB(140, 140, 140)
+local COLOR_COOLDOWN = Color3.fromRGB(255, 180, 60)
+local HEADER_COLOR = Color3.fromRGB(6, 6, 6)
+
+-- =================================================================
+-- State
+-- =================================================================
+local settings = { saveEnabled = true, antiAfk = true, showTimer = true }
+local currentID = nil
+local claimedSuccessCount = 0
+local isRunning = false
+local isMinimized = false
+local savedID, savedProgress = nil, 0
+
+-- =================================================================
+-- Helpers
+-- =================================================================
+local function notify(titleSub, txt, dur)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = "Rex Hub • " .. titleSub,
+            Text = txt,
+            Duration = dur or 3
+        })
+    end)
+end
+
+local function make(class, props, par)
+    local obj = Instance.new(class)
+    for k, v in pairs(props) do obj[k] = v end
+    obj.Parent = par
+    return obj
+end
+
+local function styleRow(frame)
+    make("UICorner", { CornerRadius = UDim.new(0, 8) }, frame)
+    make("UIStroke", { Color = COLOR_WHITE, Transparency = 0.85, Thickness = 1 }, frame)
+end
+
+-- =================================================================
+-- Save system
+-- =================================================================
+local canFile = (writefile and readfile and isfile) and true or false
+
+local function saveSettings()
+    if not canFile then return end
+    local data
+    if settings.saveEnabled then
+        data = {
+            saveEnabled = true,
+            antiAfk = settings.antiAfk,
+            showTimer = settings.showTimer,
+            lastID = currentID,
+            progress = claimedSuccessCount,
+        }
+    else
+        data = { saveEnabled = false }
+    end
+    pcall(function()
+        writefile(FILE_NAME, HttpService:JSONEncode(data))
+    end)
+end
+
+local function loadSettings()
+    if not canFile then return end
+    local ok, raw = pcall(function()
+        if isfile(FILE_NAME) then return readfile(FILE_NAME) end
+    end)
+    if not ok or not raw then return end
+
+    local ok2, data = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not ok2 or type(data) ~= "table" then return end
+
+    if data.saveEnabled == false then
+        settings.saveEnabled = false
+        return
+    end
+    if type(data.antiAfk) == "boolean" then settings.antiAfk = data.antiAfk end
+    if type(data.showTimer) == "boolean" then settings.showTimer = data.showTimer end
+    if type(data.lastID) == "number" then savedID = data.lastID end
+    if type(data.progress) == "number" then savedProgress = math.clamp(math.floor(data.progress), 0, 9) end
+end
+
+loadSettings()
+
+-- =================================================================
+-- Bersihkan instance lama
+-- =================================================================
+local env = (getgenv and getgenv()) or _G
+
+if env.RexHubCleanup then
+    pcall(env.RexHubCleanup)
+end
+if env.AFKHubConn then
+    pcall(function() env.AFKHubConn:Disconnect() end)
+end
+
+local function getParent()
+    local ok, result = pcall(function() return gethui and gethui() end)
+    if ok and result then return result end
+    if pcall(function() return CoreGui.Name end) then return CoreGui end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local parent = getParent()
+
+for _, p in ipairs({ parent, CoreGui }) do
+    for _, name in ipairs({ GUI_NAME, "AFKHub", "ATD_AutoClaim_V7", "ATD_AutoClaim_V6", "MinimalAFK_Gradient" }) do
+        pcall(function()
+            local old = p:FindFirstChild(name)
+            if old then old:Destroy() end
+        end)
+    end
+end
+
+-- =================================================================
+-- Anti-AFK
+-- =================================================================
+local idledConn = LocalPlayer.Idled:Connect(function()
+    if not settings.antiAfk then return end
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+    end)
+end)
+env.AFKHubConn = idledConn
+
+-- =================================================================
+-- Cari remote ATD (nil kalau bukan di game ATD)
+-- =================================================================
+local claimRemote
+do
+    local rf = ReplicatedStorage:WaitForChild("RemoteFunctions", 3)
+    if rf then
+        claimRemote = rf:WaitForChild("ClaimPlaytimeGift", 3)
+    end
+end
+
+-- =================================================================
+-- GUI: frame utama + header
+-- =================================================================
+local ScreenGui = make("ScreenGui", {
+    Name = GUI_NAME,
+    ResetOnSpawn = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, parent)
+
+local MainFrame = make("Frame", {
+    Size = UDim2.new(0, 320, 0, 200),
+    Position = UDim2.new(0.5, -160, 0, 16),
+    BackgroundColor3 = Color3.fromRGB(0, 0, 0),
+    BackgroundTransparency = 0.35,
+    BorderSizePixel = 0,
+    Active = true,
+}, ScreenGui)
+make("UICorner", { CornerRadius = UDim.new(0, 10) }, MainFrame)
+
+local Stroke = make("UIStroke", {
+    Thickness = 1.5,
+    ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+    Color = COLOR_WHITE,
+}, MainFrame)
+
+local StrokeGradient = make("UIGradient", {
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0.00, Color3.fromRGB(240, 240, 240)),
+        ColorSequenceKeypoint.new(0.25, Color3.fromRGB(120, 120, 120)),
+        ColorSequenceKeypoint.new(0.50, Color3.fromRGB(15, 15, 15)),
+        ColorSequenceKeypoint.new(0.75, Color3.fromRGB(120, 120, 120)),
+        ColorSequenceKeypoint.new(1.00, Color3.fromRGB(240, 240, 240)),
+    }),
+}, Stroke)
+
+-- Header (hitam pekat)
+local Header = make("Frame", {
+    Size = UDim2.new(1, 0, 0, HEADER_H),
+    BackgroundColor3 = HEADER_COLOR,
+    BorderSizePixel = 0,
+}, MainFrame)
+make("UICorner", { CornerRadius = UDim.new(0, 10) }, Header)
+
+local HeaderCover = make("Frame", {
+    Size = UDim2.new(1, 0, 0, 10),
+    Position = UDim2.new(0, 0, 1, -10),
+    BackgroundColor3 = HEADER_COLOR,
+    BorderSizePixel = 0,
+}, Header)
+
+local function headerDivider(x)
+    return make("Frame", {
+        Size = UDim2.new(0, 1, 0, 16),
+        Position = UDim2.new(0, x, 0.5, -8),
+        BackgroundColor3 = COLOR_WHITE,
+        BackgroundTransparency = 0.8,
+        BorderSizePixel = 0,
+    }, Header)
+end
+
+make("TextLabel", {
+    Size = UDim2.new(0, 56, 1, 0),
+    Position = UDim2.new(0, 12, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "Rex Hub",
+    TextColor3 = COLOR_TEXT,
+    TextSize = 13,
+    Font = Enum.Font.GothamBold,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, Header)
+headerDivider(72)
+
+make("TextLabel", {
+    Size = UDim2.new(0, 92, 1, 0),
+    Position = UDim2.new(0, 80, 0, 0),
+    BackgroundTransparency = 1,
+    Text = LocalPlayer.Name,
+    TextColor3 = COLOR_MUTED,
+    TextSize = 12,
+    Font = Enum.Font.GothamMedium,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+}, Header)
+
+local TimerDivider = headerDivider(176)
+local TimerLabel = make("TextLabel", {
+    Size = UDim2.new(0, 68, 1, 0),
+    Position = UDim2.new(0, 184, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "00:00:00",
+    TextColor3 = COLOR_TEXT,
+    TextSize = 13,
+    Font = Enum.Font.RobotoMono,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, Header)
+
+local function applyTimerVisibility()
+    TimerLabel.Visible = settings.showTimer
+    TimerDivider.Visible = settings.showTimer
+end
+applyTimerVisibility()
+
+local function headerButton(text, xOffset)
+    local btn = make("TextButton", {
+        Size = UDim2.new(0, 26, 0, 26),
+        Position = UDim2.new(1, xOffset, 0.5, -13),
+        BackgroundColor3 = COLOR_WHITE,
+        BackgroundTransparency = 0.9,
+        Text = text,
+        TextColor3 = Color3.fromRGB(210, 210, 210),
+        TextSize = 12,
+        Font = Enum.Font.GothamBold,
+        AutoButtonColor = false,
+    }, Header)
+    make("UICorner", { CornerRadius = UDim.new(0, 6) }, btn)
+    return btn
+end
+
+local MinimizeBtn = headerButton("—", -62)
+local CloseBtn = headerButton("X", -32)
+
+-- Area bawah header (transparan)
+local ContentFrame = make("Frame", {
+    Size = UDim2.new(1, 0, 1, -HEADER_H),
+    Position = UDim2.new(0, 0, 0, HEADER_H),
+    BackgroundTransparency = 1,
+}, MainFrame)
+
+-- =================================================================
+-- Toggle component
+-- =================================================================
+local function createToggle(par, y, text, initial, onChange)
+    local row = make("Frame", {
+        Size = UDim2.new(1, 0, 0, 34),
+        Position = UDim2.new(0, 0, 0, y),
+        BackgroundColor3 = COLOR_WHITE,
+        BackgroundTransparency = 0.95,
+        BorderSizePixel = 0,
+    }, par)
+    styleRow(row)
+
+    local label = make("TextLabel", {
+        Size = UDim2.new(1, -64, 1, 0),
+        Position = UDim2.new(0, 12, 0, 0),
+        BackgroundTransparency = 1,
+        Text = text,
+        TextColor3 = COLOR_TEXT,
+        TextSize = 12,
+        Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+
+    local track = make("Frame", {
+        Size = UDim2.new(0, 36, 0, 18),
+        Position = UDim2.new(1, -48, 0.5, -9),
+        BackgroundColor3 = COLOR_WHITE,
+        BackgroundTransparency = 0.85,
+        BorderSizePixel = 0,
+    }, row)
+    make("UICorner", { CornerRadius = UDim.new(1, 0) }, track)
+
+    local knob = make("Frame", {
+        Size = UDim2.new(0, 12, 0, 12),
+        Position = UDim2.new(0, 3, 0.5, -6),
+        BackgroundColor3 = Color3.fromRGB(160, 160, 160),
+        BorderSizePixel = 0,
+    }, track)
+    make("UICorner", { CornerRadius = UDim.new(1, 0) }, knob)
+
+    local hit = make("TextButton", {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Text = "",
+        ZIndex = 3,
+    }, row)
+
+    local state, locked, hint = initial and true or false, false, nil
+    local tweenInfo = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    local POS_ON = UDim2.new(1, -15, 0.5, -6)
+    local POS_OFF = UDim2.new(0, 3, 0.5, -6)
+
+    local function render(animate)
+        local trackGoal, knobGoal
+        if locked then
+            trackGoal = { BackgroundTransparency = 0.93 }
+            knobGoal = { Position = state and POS_ON or POS_OFF, BackgroundColor3 = Color3.fromRGB(80, 80, 80) }
+        elseif state then
+            trackGoal = { BackgroundTransparency = 0.1 }
+            knobGoal = { Position = POS_ON, BackgroundColor3 = Color3.fromRGB(10, 10, 10) }
+        else
+            trackGoal = { BackgroundTransparency = 0.85 }
+            knobGoal = { Position = POS_OFF, BackgroundColor3 = Color3.fromRGB(160, 160, 160) }
+        end
+
+        label.TextColor3 = locked and COLOR_MUTED or COLOR_TEXT
+        label.Text = (locked and hint) and (text .. " (" .. hint .. ")") or text
+
+        if animate then
+            TweenService:Create(track, tweenInfo, trackGoal):Play()
+            TweenService:Create(knob, tweenInfo, knobGoal):Play()
+        else
+            for k, v in pairs(trackGoal) do track[k] = v end
+            for k, v in pairs(knobGoal) do knob[k] = v end
+        end
+    end
+
+    hit.MouseButton1Click:Connect(function()
+        if locked then return end
+        state = not state
+        render(true)
+        if onChange then onChange(state) end
+    end)
+
+    render(false)
+
+    local api = {}
+    function api.get() return state end
+    function api.set(v)
+        state = v and true or false
+        render(true)
+    end
+    function api.setLocked(v, h)
+        locked = v
+        hint = h
+        render(true)
+    end
+    return api
+end
+
+-- =================================================================
+-- Tabs
+-- =================================================================
+local tabs = {}
+local tabOrder = { "AFK", "Auto Claim", "Settings" }
+local currentTab = "AFK"
+
+local function applySize()
+    local h = HEADER_H
+    if not isMinimized then
+        h = HEADER_H + TAB_AREA_H + tabs[currentTab].height + BOTTOM_PAD
+    end
+    TweenService:Create(
+        MainFrame,
+        TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        { Size = UDim2.new(0, 320, 0, h) }
+    ):Play()
+end
+
+local function selectTab(name)
+    currentTab = name
+    for n, t in pairs(tabs) do
+        local active = (n == name)
+        t.page.Visible = active
+        t.button.BackgroundTransparency = active and 0.88 or 1
+        t.button.TextColor3 = active and COLOR_TEXT or COLOR_MUTED
+    end
+    applySize()
+end
+
+local function setPageHeight(name, h)
+    tabs[name].height = h
+    tabs[name].page.Size = UDim2.new(0, 296, 0, h)
+end
+
+local TabBar = make("Frame", {
+    Size = UDim2.new(0, 296, 0, 28),
+    Position = UDim2.new(0, 12, 0, 8),
+    BackgroundTransparency = 1,
+}, ContentFrame)
+
+for i, name in ipairs(tabOrder) do
+    local btn = make("TextButton", {
+        Size = UDim2.new(0, 96, 1, 0),
+        Position = UDim2.new(0, (i - 1) * 100, 0, 0),
+        BackgroundColor3 = COLOR_WHITE,
+        BackgroundTransparency = 1,
+        Text = name,
+        TextColor3 = COLOR_MUTED,
+        TextSize = 12,
+        Font = Enum.Font.GothamBold,
+        AutoButtonColor = false,
+    }, TabBar)
+    make("UICorner", { CornerRadius = UDim.new(0, 8) }, btn)
+
+    local page = make("Frame", {
+        Size = UDim2.new(0, 296, 0, 0),
+        Position = UDim2.new(0, 12, 0, TAB_AREA_H),
+        BackgroundTransparency = 1,
+        Visible = false,
+    }, ContentFrame)
+
+    tabs[name] = { button = btn, page = page, height = 0 }
+    btn.MouseButton1Click:Connect(function() selectTab(name) end)
+end
+
+-- =================================================================
+-- Tab: AFK
+-- =================================================================
+do
+    local page = tabs["AFK"].page
+    setPageHeight("AFK", 76)
+
+    createToggle(page, 0, "Anti-AFK", settings.antiAfk, function(v)
+        settings.antiAfk = v
+        saveSettings()
+        notify("Anti-AFK", v and "Anti-AFK enabled." or "Anti-AFK disabled.", 2)
+    end)
+
+    createToggle(page, 42, "Show timer", settings.showTimer, function(v)
+        settings.showTimer = v
+        applyTimerVisibility()
+        saveSettings()
+    end)
+end
+
+-- =================================================================
+-- Tab: Auto Claim (khusus ATD)
+-- =================================================================
+do
+    local page = tabs["Auto Claim"].page
+
+    if not claimRemote then
+        setPageHeight("Auto Claim", 50)
+        make("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 40),
+            BackgroundTransparency = 1,
+            Text = "Not available in this game.\nOnly works in Alliance Tower Defense.",
+            TextColor3 = COLOR_MUTED,
+            TextSize = 11,
+            Font = Enum.Font.GothamMedium,
+        }, page)
+    else
+        setPageHeight("Auto Claim", 130)
+
+        -- Panel info: ID | GIFT | STATUS
+        local InfoBar = make("Frame", {
+            Size = UDim2.new(1, 0, 0, 48),
+            BackgroundColor3 = COLOR_WHITE,
+            BackgroundTransparency = 0.95,
+            BorderSizePixel = 0,
+        }, page)
+        styleRow(InfoBar)
+
+        local function caption(text, x, width, align)
+            return make("TextLabel", {
+                Size = UDim2.new(0, width, 0, 12),
+                Position = UDim2.new(0, x, 0, 6),
+                BackgroundTransparency = 1,
+                Text = text,
+                TextColor3 = COLOR_MUTED,
+                TextSize = 9,
+                Font = Enum.Font.GothamMedium,
+                TextXAlignment = align,
+            }, InfoBar)
+        end
+
+        local function value(text, x, width, align)
+            return make("TextLabel", {
+                Size = UDim2.new(0, width, 0, 22),
+                Position = UDim2.new(0, x, 0, 20),
+                BackgroundTransparency = 1,
+                Text = text,
+                TextColor3 = COLOR_TEXT,
+                TextSize = 15,
+                Font = Enum.Font.RobotoMono,
+                TextXAlignment = align,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+            }, InfoBar)
+        end
+
+        local function infoDivider(x)
+            return make("Frame", {
+                Size = UDim2.new(0, 1, 0, 26),
+                Position = UDim2.new(0, x, 0.5, -13),
+                BackgroundColor3 = COLOR_WHITE,
+                BackgroundTransparency = 0.85,
+                BorderSizePixel = 0,
+            }, InfoBar)
+        end
+
+        caption("ID", 12, 100, Enum.TextXAlignment.Left)
+        local IdValueLabel = value("-----", 12, 104, Enum.TextXAlignment.Left)
+        infoDivider(120)
+
+        caption("GIFT", 121, 70, Enum.TextXAlignment.Center)
+        local GiftInputBox = make("TextBox", {
+            Size = UDim2.new(0, 32, 0, 22),
+            Position = UDim2.new(0, 120, 0, 20),
+            BackgroundTransparency = 1,
+            Text = "0",
+            PlaceholderText = "0",
+            TextColor3 = COLOR_TEXT,
+            TextSize = 15,
+            Font = Enum.Font.RobotoMono,
+            TextXAlignment = Enum.TextXAlignment.Right,
+            ClearTextOnFocus = false,
+        }, InfoBar)
+        make("TextLabel", {
+            Size = UDim2.new(0, 28, 0, 22),
+            Position = UDim2.new(0, 152, 0, 20),
+            BackgroundTransparency = 1,
+            Text = "/9",
+            TextColor3 = COLOR_MUTED,
+            TextSize = 15,
+            Font = Enum.Font.RobotoMono,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, InfoBar)
+        infoDivider(191)
+
+        caption("STATUS", 192, 104, Enum.TextXAlignment.Center)
+        local StatusValue = value("IDLE", 192, 104, Enum.TextXAlignment.Center)
+
+        local function setStatus(text, color)
+            StatusValue.Text = text
+            StatusValue.TextColor3 = color
+        end
+        setStatus("IDLE", COLOR_MUTED)
+
+        -- Input ID + SET
+        local IdInputBox = make("TextBox", {
+            Size = UDim2.new(1, -68, 0, 32),
+            Position = UDim2.new(0, 0, 0, 56),
+            BackgroundColor3 = COLOR_WHITE,
+            BackgroundTransparency = 0.95,
+            Text = "",
+            PlaceholderText = "Enter target ID...",
+            PlaceholderColor3 = COLOR_MUTED,
+            TextColor3 = COLOR_TEXT,
+            TextSize = 13,
+            Font = Enum.Font.RobotoMono,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            ClearTextOnFocus = false,
+        }, page)
+        styleRow(IdInputBox)
+        make("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }, IdInputBox)
+
+        local SetIdBtn = make("TextButton", {
+            Size = UDim2.new(0, 60, 0, 32),
+            Position = UDim2.new(1, -60, 0, 56),
+            BackgroundColor3 = COLOR_WHITE,
+            BackgroundTransparency = 0.88,
+            Text = "SET",
+            TextColor3 = COLOR_TEXT,
+            TextSize = 11,
+            Font = Enum.Font.GothamBold,
+            AutoButtonColor = false,
+        }, page)
+        make("UICorner", { CornerRadius = UDim.new(0, 8) }, SetIdBtn)
+
+        -- Toggle Auto Claim (terkunci sampai ID di-set)
+        local claimToggle = createToggle(page, 96, "Auto Claim", false, function(v)
+            isRunning = v
+            if v then
+                setStatus("RUN", COLOR_TEXT)
+                notify("Operation Active", "Auto-claim process started.", 3)
+            else
+                setStatus("IDLE", COLOR_MUTED)
+                notify("Operation Paused", "Auto-claim process suspended.", 3)
+            end
+        end)
+        claimToggle.setLocked(true, "set ID first")
+
+        local function setID(idVal, silent, keepProgress)
+            local num = tonumber(idVal)
+            if not num then
+                notify("Invalid Input", "Please enter a valid numeric ID.", 2.5)
+                return false
+            end
+
+            if num ~= currentID and not keepProgress then
+                claimedSuccessCount = 0
+                GiftInputBox.Text = "0"
+            end
+
+            currentID = num
+            IdInputBox.Text = tostring(num)
+            IdValueLabel.Text = tostring(num)
+            claimToggle.setLocked(false)
+            saveSettings()
+
+            if not silent then
+                notify("ID Configured", "Target ID set to: " .. tostring(num), 2.5)
+            end
+            return true
+        end
+
+        SetIdBtn.MouseButton1Click:Connect(function()
+            if IdInputBox.Text ~= "" then
+                setID(IdInputBox.Text)
+            else
+                notify("Invalid Input", "Please enter an ID first.", 2.5)
+            end
+        end)
+
+        IdInputBox.FocusLost:Connect(function(enterPressed)
+            if enterPressed and IdInputBox.Text ~= "" then
+                setID(IdInputBox.Text)
+            end
+        end)
+
+        -- Double tap untuk edit progress manual
+        local lastTapTick = 0
+        GiftInputBox.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
+                local now = tick()
+                if now - lastTapTick < 0.4 then
+                    GiftInputBox:CaptureFocus()
+                    notify("Configuration", "Enter current gift progress number (0-9)", 2)
+                end
+                lastTapTick = now
+            end
+        end)
+
+        GiftInputBox.FocusLost:Connect(function()
+            local val = tonumber(GiftInputBox.Text:match("%d+"))
+            if val then
+                claimedSuccessCount = math.clamp(val, 0, 9)
+                GiftInputBox.Text = tostring(claimedSuccessCount)
+                saveSettings()
+                notify("Progress Updated", "Gift counter set to: " .. claimedSuccessCount .. "/9", 3)
+            else
+                GiftInputBox.Text = tostring(claimedSuccessCount)
+                notify("Sync Failed", "Invalid format detected. Reverting value.", 2)
+            end
+        end)
+
+        -- Load data tersimpan
+        if savedID then
+            claimedSuccessCount = savedProgress
+            GiftInputBox.Text = tostring(claimedSuccessCount)
+            setID(savedID, true, true)
+        end
+
+        -- Loop auto claim
+        task.spawn(function()
+            while ScreenGui.Parent do
+                if isRunning and currentID then
+                    GiftInputBox.Text = tostring(claimedSuccessCount)
+
+                    for giftIndex = claimedSuccessCount + 1, 9 do
+                        if not isRunning or not ScreenGui.Parent then break end
+
+                        local ok, res = pcall(function()
+                            return claimRemote:InvokeServer(giftIndex, currentID)
+                        end)
+
+                        if ok and res == true then
+                            claimedSuccessCount = giftIndex
+                            GiftInputBox.Text = tostring(claimedSuccessCount)
+                            saveSettings()
+                            notify("Reward Claimed", "Claimed Gift #" .. giftIndex .. " for ID " .. currentID, 2)
+                        end
+
+                        task.wait(2)
+                    end
+
+                    if isRunning then
+                        if claimedSuccessCount >= 9 then
+                            setID(currentID + 1, true)
+                            notify("Sequence Complete", "All 9 gifts claimed. Next ID: " .. tostring(currentID), 4)
+                            task.wait(2)
+                        else
+                            setStatus("WAIT", COLOR_COOLDOWN)
+                            notify("Status: Cooldown", "All available rewards claimed. Waiting...", 3)
+                            for _ = 1, 30 do
+                                if not isRunning or not ScreenGui.Parent then break end
+                                task.wait(1)
+                            end
+                            if isRunning then setStatus("RUN", COLOR_TEXT) end
+                        end
+                    end
+                else
+                    task.wait(0.5)
+                end
+            end
+        end)
+    end
+end
+
+-- =================================================================
+-- Tab: Settings
+-- =================================================================
+do
+    local page = tabs["Settings"].page
+    setPageHeight("Settings", 76)
+
+    local saveToggle = createToggle(page, 0, "Save settings", settings.saveEnabled, function(v)
+        settings.saveEnabled = v
+        saveSettings()
+        notify("Save Settings", v and "Settings will be saved." or "Saving disabled. Stored data removed.", 2.5)
+    end)
+    if not canFile then
+        saveToggle.setLocked(true, "not supported")
+    end
+
+    local ClearBtn = make("TextButton", {
+        Size = UDim2.new(1, 0, 0, 32),
+        Position = UDim2.new(0, 0, 0, 42),
+        BackgroundColor3 = COLOR_WHITE,
+        BackgroundTransparency = 0.88,
+        Text = "Clear saved data",
+        TextColor3 = COLOR_TEXT,
+        TextSize = 12,
+        Font = Enum.Font.GothamBold,
+        AutoButtonColor = false,
+    }, page)
+    make("UICorner", { CornerRadius = UDim.new(0, 8) }, ClearBtn)
+
+    ClearBtn.MouseButton1Click:Connect(function()
+        local cleared = false
+        pcall(function()
+            if delfile and isfile and isfile(FILE_NAME) then
+                delfile(FILE_NAME)
+                cleared = true
+            end
+        end)
+        notify("Saved Data", cleared and "Saved data cleared." or "No saved data found.", 2.5)
+    end)
+end
+
+-- =================================================================
+-- Drag (mouse & sentuh)
+-- =================================================================
+local dragging, dragInput, dragStart, startPos = false, nil, nil, nil
+
+MainFrame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+MainFrame.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+
+local dragConn = UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+-- =================================================================
+-- Animasi border + timer
+-- =================================================================
+local startTime = tick()
+local lastSecond = -1
+
+local renderConn = RunService.RenderStepped:Connect(function()
+    local t = tick()
+    StrokeGradient.Rotation = (t * 25) % 360
+
+    local elapsed = math.floor(t - startTime)
+    if elapsed ~= lastSecond then
+        lastSecond = elapsed
+        TimerLabel.Text = string.format("%02d:%02d:%02d",
+            math.floor(elapsed / 3600),
+            math.floor((elapsed % 3600) / 60),
+            elapsed % 60)
+    end
+end)
+
+-- =================================================================
+-- Header buttons + cleanup
+-- =================================================================
+local function cleanup()
+    isRunning = false
+    pcall(function() idledConn:Disconnect() end)
+    pcall(function() renderConn:Disconnect() end)
+    pcall(function() dragConn:Disconnect() end)
+    pcall(function() ScreenGui:Destroy() end)
+    if env.AFKHubConn == idledConn then env.AFKHubConn = nil end
+    env.RexHubCleanup = nil
+end
+env.RexHubCleanup = cleanup
+
+MinimizeBtn.MouseButton1Click:Connect(function()
+    isMinimized = not isMinimized
+    ContentFrame.Visible = not isMinimized
+    HeaderCover.Visible = not isMinimized
+    MinimizeBtn.Text = isMinimized and "+" or "—"
+    applySize()
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    notify("Terminated", "Rex Hub closed. All features stopped.", 2)
+    cleanup()
+end)
+
+selectTab("AFK")
+notify("Loaded", "Welcome, " .. LocalPlayer.Name, 3)
